@@ -73,6 +73,16 @@ def _ensure_backend() -> str:
     return "timeout"
 
 
+# Bridge Streamlit secrets -> process environment so the in-process backend and
+# the Anthropic client can read ANTHROPIC_API_KEY. On Streamlit Community Cloud,
+# adding the key under Settings -> Secrets is the way to provide it; this copies
+# it into os.environ where the backend looks for it.
+try:
+    if not os.environ.get("ANTHROPIC_API_KEY") and "ANTHROPIC_API_KEY" in st.secrets:
+        os.environ["ANTHROPIC_API_KEY"] = st.secrets["ANTHROPIC_API_KEY"]
+except Exception:  # no secrets file present (normal in local dev)
+    pass
+
 # Ensure the backend is reachable before any API call (starts it in-process on
 # single-container hosts; reuses an external uvicorn during local dev).
 _ensure_backend()

@@ -31,11 +31,22 @@ from fastapi import FastAPI, HTTPException
 from fastmcp import Client
 from pydantic import BaseModel, Field
 
-from backend.config import settings
+from backend.config import PROJECT_ROOT, settings
 from backend.connection import build_connection_string, test_connection
 from backend.deploy import MCPDeployment
 from backend.generator import generate_server
 from backend.logging_config import configure_logging, get_logger
+
+# Load secrets from a local .env into the process environment so ANTHROPIC_API_KEY
+# (and any other keys) are picked up without exporting them by hand. The .env file
+# is git-ignored — keys never reach the repo. On Streamlit Community Cloud, use the
+# Secrets UI instead (it exposes values as environment variables too).
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(PROJECT_ROOT / ".env")
+except Exception:  # noqa: BLE001 - dotenv is optional
+    pass
 
 log = get_logger("mcp.api")
 
