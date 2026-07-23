@@ -20,6 +20,7 @@ Run with:
 """
 
 import json
+import os
 import socket
 import time
 import uuid
@@ -37,6 +38,60 @@ from backend.generator import generate_server
 from backend.logging_config import configure_logging, get_logger
 
 log = get_logger("mcp.api")
+
+# -------------------------------
+# Optional agentic assistant (Claude)
+# -------------------------------
+# The AI "ask your data" feature is optional: it works only when the anthropic
+# SDK is installed and ANTHROPIC_API_KEY is configured. Everything else runs
+# without it.
+try:
+    from anthropic import AsyncAnthropic
+
+    _ANTHROPIC_AVAILABLE = True
+except Exception:  # noqa: BLE001
+    AsyncAnthropic = None  # type: ignore
+    _ANTHROPIC_AVAILABLE = False
+
+_anthropic_client = None  # cached AsyncAnthropic instance
+
+
+def _get_anthropic():
+    """Return (client, error). Client is cached; error explains why it's absent."""
+    global _anthropic_client
+    if not _ANTHROPIC_AVAILABLE:
+        return None, "The 'anthropic' package is not installed on the API server."
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        return None, (
+            "ANTHROPIC_API_KEY is not set on the API server. Set it and restart the "
+            "backend to enable the AI assistant."
+        )
+    if _anthropic_client is None:
+        try:
+            _anthropic_client = AsyncAnthropic()
+        except Exception:  # noqa: BLE001
+            return None, "Failed to initialise the Anthropic client."
+    return _anthropic_client, None
+
+
+# Tool Claude is given: the ONLY way it can touch the database. It routes through
+# the deployed MCP server, so the read-only guard gates every query the agent runs.
+_RUN_QUERY_TOOL = {
+    "name": "run_query",
+    "description": (
+        "Execute a single read-only SQL SELECT against the connected database and "
+        "return the rows as JSON. Only SELECT is allowed — INSERT/UPDATE/DELETE/DDL "
+        "are refused. Use information_schema to discover tables and columns when unsure."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "sql": {"type": "string", "description": "A single SELECT statement."}
+        },
+        "required": ["sql"],
+        "additionalProperties": False,
+    },
+}
 
 
 # -------------------------------
@@ -117,6 +172,18 @@ class QueryResult(BaseModel):
     success: bool
     rows: list = []
     row_count: int = 0
+    message: Optional[str] = None
+
+
+class AskRequest(BaseModel):
+    deployment_id: str
+    question: str
+
+
+class AskResult(BaseModel):
+    success: bool
+    answer: Optional[str] = None
+    queries: list = []  # the SELECTs the agent chose to run
     message: Optional[str] = None
 
 
@@ -280,6 +347,16 @@ def api_register(deployment_id: str):
     )
 
 
+async def _mcp_run_query(url: str, sql: str) -> dict:
+    """Call the deployed MCP server's run_query tool and return its dict result."""
+    async with Client(url) as client:
+        result = await client.call_tool("run_query", {"sql": sql})
+    data = result.data
+    if data is None:
+        data = json.loads(result.content[0].text)
+    return data
+
+
 @app.post("/api/query", response_model=QueryResult)
 async def api_query(req: QueryRequest):
     """Step 6 — run a read-only query THROUGH the deployed MCP server."""
@@ -287,20 +364,11 @@ async def api_query(req: QueryRequest):
     if entry is None:
         raise HTTPException(status_code=404, detail="Unknown deployment_id")
 
-    url = entry["meta"]["url"]
     try:
-        async with Client(url) as client:
-            result = await client.call_tool("run_query", {"sql": req.sql})
+        data = await _mcp_run_query(entry["meta"]["url"], req.sql)
     except Exception as exc:  # noqa: BLE001 - surface any client/transport error
         log.error("query transport error dep=%s: %s", req.deployment_id, exc)
         return QueryResult(success=False, message=f"Query failed: {exc}")
-
-    data = result.data
-    if data is None:
-        try:
-            data = json.loads(result.content[0].text)
-        except Exception:  # noqa: BLE001
-            return QueryResult(success=False, message="Unparseable server response.")
 
     ok = bool(data.get("success"))
     rows = data.get("rows", [])
@@ -316,6 +384,87 @@ async def api_query(req: QueryRequest):
         row_count=data.get("row_count", len(rows)),
         message=data.get("message"),
     )
+
+
+@app.post("/api/ask", response_model=AskResult)
+async def api_ask(req: AskRequest):
+    """Agentic — Claude answers a natural-language question about the data.
+
+    Claude is given a single `run_query` tool backed by the deployed MCP server.
+    It explores the schema and runs SELECTs to build an answer. Because the tool
+    routes through the read-only server, the agent can never write, no matter
+    what SQL it generates.
+    """
+    entry = _deployments.get(req.deployment_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Unknown deployment_id")
+
+    client, err = _get_anthropic()
+    if client is None:
+        return AskResult(success=False, message=err)
+
+    meta = entry["meta"]
+    url = meta["url"]
+    system = (
+        f"You are a data analyst assistant connected to a READ-ONLY {meta['db_type']} "
+        f"database named '{meta['database']}'. Answer the user's question by exploring "
+        "the schema and running SELECT queries with the run_query tool. When unsure of "
+        "table or column names, query information_schema first. Only SELECT is possible; "
+        "never attempt writes. Base every statement on actual query results — do not "
+        "fabricate data. When you have enough information, answer concisely in plain language."
+    )
+    messages = [{"role": "user", "content": req.question}]
+    queries: list[str] = []
+
+    try:
+        for _ in range(8):  # bound the agentic loop
+            resp = await client.messages.create(
+                model="claude-opus-4-8",
+                max_tokens=8000,
+                thinking={"type": "adaptive"},
+                output_config={"effort": "low"},
+                system=system,
+                tools=[_RUN_QUERY_TOOL],
+                messages=messages,
+            )
+
+            if resp.stop_reason == "refusal":
+                return AskResult(success=False, message="The assistant declined this request.")
+
+            if resp.stop_reason == "tool_use":
+                # Preserve the full assistant turn (thinking + tool_use blocks).
+                messages.append({"role": "assistant", "content": resp.content})
+                tool_results = []
+                for block in resp.content:
+                    if block.type == "tool_use" and block.name == "run_query":
+                        sql = block.input.get("sql", "")
+                        queries.append(sql)
+                        try:
+                            data = await _mcp_run_query(url, sql)
+                        except Exception as exc:  # noqa: BLE001
+                            data = {"success": False, "message": f"Query failed: {exc}"}
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": json.dumps(data)[:20000],  # cap oversized results
+                        })
+                messages.append({"role": "user", "content": tool_results})
+                continue
+
+            # end_turn (or anything else) — extract the final answer text.
+            answer = "".join(b.text for b in resp.content if b.type == "text").strip()
+            log.info("ask ok dep=%s queries=%d", req.deployment_id, len(queries))
+            return AskResult(success=True, answer=answer, queries=queries)
+
+        return AskResult(
+            success=False,
+            answer=None,
+            queries=queries,
+            message="Reached the reasoning-step limit before finishing.",
+        )
+    except Exception as exc:  # noqa: BLE001 - surface API/transport errors cleanly
+        log.error("ask error dep=%s: %s", req.deployment_id, exc)
+        return AskResult(success=False, queries=queries, message=f"AI assistant error: {exc}")
 
 
 @app.get("/api/status/{deployment_id}")

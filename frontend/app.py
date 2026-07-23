@@ -376,6 +376,10 @@ def api_query(deployment_id: str, sql: str) -> dict:
     return _post("/api/query", {"deployment_id": deployment_id, "sql": sql})
 
 
+def api_ask(deployment_id: str, question: str) -> dict:
+    return _post("/api/ask", {"deployment_id": deployment_id, "question": question})
+
+
 # -------------------------------
 # Brand header
 # -------------------------------
@@ -459,6 +463,7 @@ def _run_build(config: dict):
         "config_text": registration.get("config_text", ""),
     }
     st.session_state["query_result"] = None
+    st.session_state["ask_result"] = None
     st.session_state.pop("test", None)
 
 
@@ -520,6 +525,43 @@ if active:
         )
         st.code(active["config_text"], language="json")
 
+    # --- Agentic: ask your data in plain English (Claude uses the MCP server) ---
+    st.markdown('<div class="section-title">🤖 Ask your data</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<p class="section-sub">Ask a question in plain English. <b>Claude</b> explores the '
+        'schema and runs <code>SELECT</code> queries <b>through your read-only MCP server</b> '
+        'to answer — it cannot write, no matter what it generates.</p>',
+        unsafe_allow_html=True,
+    )
+    question = st.text_input(
+        "Your question",
+        placeholder="e.g. How many tables are in this database, and which has the most rows?",
+        key="ask_input",
+    )
+    if st.button("✨  Ask Claude", key="ask_btn"):
+        if question.strip():
+            try:
+                with st.spinner("Claude is exploring your data..."):
+                    st.session_state["ask_result"] = api_ask(active["deployment_id"], question)
+            except APIError as exc:
+                st.session_state["ask_result"] = {"success": False, "message": str(exc)}
+
+    ask = st.session_state.get("ask_result")
+    if ask is not None:
+        if ask.get("success"):
+            st.markdown(
+                '<div class="result-card">'
+                '<span class="badge ok"><span class="dotled"></span>Answer</span></div>',
+                unsafe_allow_html=True,
+            )
+            st.markdown(ask.get("answer", ""))
+            if ask.get("queries"):
+                with st.expander(f"🔎 SQL Claude ran ({len(ask['queries'])})", expanded=False):
+                    for q in ask["queries"]:
+                        st.code(q, language="sql")
+        else:
+            st.info(ask.get("message", "The AI assistant is unavailable."))
+
     # --- Step 6: run read-only queries through the new server ---
     st.markdown('<div class="section-title">Query your data</div>', unsafe_allow_html=True)
     st.markdown(
@@ -560,6 +602,7 @@ if active:
             pass
         st.session_state["active"] = None
         st.session_state["query_result"] = None
+        st.session_state["ask_result"] = None
         st.rerun()
 
     result = st.session_state.get("query_result")
@@ -588,6 +631,7 @@ if active:
     if st.button("＋  Connect another data source", key="connect_another"):
         st.session_state["active"] = None
         st.session_state["query_result"] = None
+        st.session_state["ask_result"] = None
         st.rerun()
 
 # ================================================================
