@@ -12,6 +12,8 @@ fully decoupled from the build logic:
 
 Generated servers run over HTTP; the API connects to them as an MCP client to
 execute SELECT queries. INSERT/UPDATE/DELETE are refused by the server itself.
+Database connection strings are injected into each server via an environment
+variable and never written to disk.
 
 Run with:
     python -m uvicorn backend.api:app --host 0.0.0.0 --port 8000 --reload
@@ -21,27 +23,53 @@ import json
 import socket
 import time
 import uuid
-from pathlib import Path
+from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from fastmcp import Client
 from pydantic import BaseModel, Field
 
-from backend.connection import test_connection
-from backend.generator import generate_server, OUTPUT_DIR
+from backend.config import settings
+from backend.connection import build_connection_string, test_connection
 from backend.deploy import MCPDeployment
+from backend.generator import generate_server
+from backend.logging_config import configure_logging, get_logger
+
+log = get_logger("mcp.api")
+
+
+# -------------------------------
+# In-memory deployment registry
+# -------------------------------
+# deployment_id -> {"deployment": MCPDeployment, "meta": {...}}
+_deployments: dict[str, dict] = {}
+
+
+def _stop_all() -> None:
+    """Terminate and forget every tracked deployment."""
+    for entry in _deployments.values():
+        entry["deployment"].stop()
+    _deployments.clear()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    configure_logging(settings.log_level)
+    log.info("MCP Server Builder API starting (port range %s-%s)",
+             settings.port_range_start, settings.port_range_end)
+    yield
+    if _deployments:
+        log.info("Shutdown: stopping %d active deployment(s)", len(_deployments))
+    _stop_all()
+
 
 app = FastAPI(
     title="MCP Server Builder API",
     description="Generate, deploy and register secure read-only MCP servers from SQL databases.",
-    version="2.0.0",
+    version="2.1.0",
+    lifespan=lifespan,
 )
-
-# Where registered data sources are persisted so a host application could
-# discover them. Represents "registration with the host application".
-REGISTRY_FILE = OUTPUT_DIR / "registry.json"
-PORT_RANGE = (8100, 8999)
 
 
 # -------------------------------
@@ -93,24 +121,20 @@ class QueryResult(BaseModel):
 
 
 # -------------------------------
-# In-memory deployment registry
+# Helpers
 # -------------------------------
-# deployment_id -> {"deployment": MCPDeployment, "meta": {...}}
-_deployments: dict[str, dict] = {}
-
-
 def _find_free_port() -> int:
-    """Return a TCP port on 127.0.0.1 that is currently free to bind."""
-    for port in range(*PORT_RANGE):
+    """Return a TCP port on the bind host that is currently free to bind."""
+    for port in range(settings.port_range_start, settings.port_range_end):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
-            s.bind(("127.0.0.1", port))
+            s.bind((settings.mcp_bind_host, port))
             return port
         except OSError:
             continue
         finally:
             s.close()
-    raise RuntimeError("No free port available in range")
+    raise HTTPException(status_code=503, detail="No free port available for a new server")
 
 
 def _stop_matching(server_name: str) -> None:
@@ -131,7 +155,7 @@ def _host_config(server_name: str, url: str) -> dict:
 
 
 def _persist_registry() -> None:
-    """Write all registered data sources to disk for host-app discovery."""
+    """Write registered data sources to disk for host-app discovery (no secrets)."""
     registered = {
         entry["meta"]["server_name"]: {
             "url": entry["meta"]["url"],
@@ -142,21 +166,36 @@ def _persist_registry() -> None:
         for entry in _deployments.values()
         if entry["meta"].get("registered")
     }
-    REGISTRY_FILE.write_text(json.dumps({"mcpServers": registered}, indent=2))
+    settings.registry_file.parent.mkdir(exist_ok=True)
+    settings.registry_file.write_text(json.dumps({"mcpServers": registered}, indent=2))
 
 
 # -------------------------------
-# Routes
+# Health / readiness
 # -------------------------------
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "active_deployments": len(_deployments)}
+    """Liveness — the process is up and serving."""
+    return {"status": "ok"}
 
 
+@app.get("/api/ready")
+def ready():
+    """Readiness — the service can accept work."""
+    return {"ready": True, "active_deployments": len(_deployments)}
+
+
+# -------------------------------
+# Build flow
+# -------------------------------
 @app.post("/api/test-connection", response_model=TestResult)
 def api_test_connection(config: DBConfig):
     """Step 2 — validate credentials with a single read-only `SELECT 1`."""
-    success, message = test_connection(config.model_dump())
+    cfg = config.model_dump()
+    success, message = test_connection(cfg)
+    log.info("test-connection db=%s host=%s user=%s ssl=%s -> %s",
+             cfg["database"], cfg["host"], cfg["username"], cfg["ssl"],
+             "ok" if success else "FAILED")
     return TestResult(success=success, message=message)
 
 
@@ -167,6 +206,7 @@ def api_deploy(config: DBConfig):
 
     success, message = test_connection(cfg)
     if not success:
+        log.warning("deploy aborted: connection test failed for db=%s", cfg["database"])
         return DeployResult(success=False, message=message)
 
     server_name = cfg["database"].replace(" ", "_")
@@ -174,22 +214,22 @@ def api_deploy(config: DBConfig):
 
     port = _find_free_port()
     server_path = generate_server(cfg, port)
+    db_url = build_connection_string(cfg)  # injected via env — never written to disk
 
-    deployment = MCPDeployment(host="127.0.0.1", port=port)
-    deployment.deploy(server_path)
+    deployment = MCPDeployment(host=settings.mcp_bind_host, port=port)
+    deployment.deploy(server_path, db_url)
 
-    running = deployment.wait_until_ready(timeout=12.0)
-    log = None
+    running = deployment.wait_until_ready(timeout=settings.deploy_ready_timeout)
     if not running:
         _, err = deployment.process.communicate()
-        log = err or "Server did not become ready in time."
+        log.error("deploy failed: server=%s did not start", server_name)
         return DeployResult(
             success=False,
             message="Server failed to start.",
             server_path=str(server_path),
             server_name=server_name,
             running=False,
-            log=log,
+            log=err or "Server did not become ready in time.",
         )
 
     deployment_id = uuid.uuid4().hex
@@ -205,6 +245,7 @@ def api_deploy(config: DBConfig):
             "registered": False,
         },
     }
+    log.info("deployed server=%s id=%s url=%s", server_name, deployment_id, deployment.url)
 
     return DeployResult(
         success=True,
@@ -229,6 +270,7 @@ def api_register(deployment_id: str):
 
     meta["registered"] = True
     _persist_registry()
+    log.info("registered server=%s with host application", meta["server_name"])
 
     return RegisterResult(
         registered=True,
@@ -240,11 +282,7 @@ def api_register(deployment_id: str):
 
 @app.post("/api/query", response_model=QueryResult)
 async def api_query(req: QueryRequest):
-    """Step 6 — run a read-only query THROUGH the deployed MCP server.
-
-    The API acts as an MCP client, calls the server's `run_query` tool, and
-    returns whatever the server returns — including its refusal for writes.
-    """
+    """Step 6 — run a read-only query THROUGH the deployed MCP server."""
     entry = _deployments.get(req.deployment_id)
     if entry is None:
         raise HTTPException(status_code=404, detail="Unknown deployment_id")
@@ -254,20 +292,28 @@ async def api_query(req: QueryRequest):
         async with Client(url) as client:
             result = await client.call_tool("run_query", {"sql": req.sql})
     except Exception as exc:  # noqa: BLE001 - surface any client/transport error
+        log.error("query transport error dep=%s: %s", req.deployment_id, exc)
         return QueryResult(success=False, message=f"Query failed: {exc}")
 
     data = result.data
     if data is None:
-        # Fall back to parsing the text content block.
         try:
             data = json.loads(result.content[0].text)
         except Exception:  # noqa: BLE001
             return QueryResult(success=False, message="Unparseable server response.")
 
+    ok = bool(data.get("success"))
+    rows = data.get("rows", [])
+    if ok:
+        log.info("query ok dep=%s rows=%d", req.deployment_id, len(rows))
+    else:
+        # A refused write is expected behaviour — record it for audit.
+        log.warning("query refused/error dep=%s", req.deployment_id)
+
     return QueryResult(
-        success=bool(data.get("success")),
-        rows=data.get("rows", []),
-        row_count=data.get("row_count", len(data.get("rows", []))),
+        success=ok,
+        rows=rows,
+        row_count=data.get("row_count", len(rows)),
         message=data.get("message"),
     )
 
@@ -288,4 +334,5 @@ def api_stop(deployment_id: str):
     entry["deployment"].stop()
     del _deployments[deployment_id]
     _persist_registry()
+    log.info("stopped deployment id=%s", deployment_id)
     return {"stopped": True}
