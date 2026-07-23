@@ -1,0 +1,12 @@
+streamlit
+python-dotenv
+sqlalchemy
+pymysql
+psycopg2-binary
+pyodbc
+fastmcp
+sqlglot
+fastapi
+uvicorn[standard]
+requests
+certifi

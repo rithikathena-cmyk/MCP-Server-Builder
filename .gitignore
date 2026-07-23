@@ -1,0 +1,18 @@
+# Secrets — generated servers embed the DB connection string (credentials!)
+generated_servers/*.py
+generated_servers/registry.json
+.env
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
