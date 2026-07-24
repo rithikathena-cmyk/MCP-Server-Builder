@@ -386,8 +386,15 @@ def api_query(deployment_id: str, sql: str) -> dict:
     return _post("/api/query", {"deployment_id": deployment_id, "sql": sql})
 
 
-def api_ask(deployment_id: str, question: str) -> dict:
-    return _post("/api/ask", {"deployment_id": deployment_id, "question": question})
+def api_ask(deployment_id: str, question: str, history: list | None = None) -> dict:
+    return _post(
+        "/api/ask",
+        {
+            "deployment_id": deployment_id,
+            "question": question,
+            "history": history or [],
+        },
+    )
 
 
 # -------------------------------
@@ -473,7 +480,7 @@ def _run_build(config: dict):
         "config_text": registration.get("config_text", ""),
     }
     st.session_state["query_result"] = None
-    st.session_state["ask_result"] = None
+    st.session_state["chat"] = []
     st.session_state.pop("test", None)
 
 
@@ -535,42 +542,76 @@ if active:
         )
         st.code(active["config_text"], language="json")
 
-    # --- Agentic: ask your data in plain English (Claude uses the MCP server) ---
-    st.markdown('<div class="section-title">🤖 Ask your data</div>', unsafe_allow_html=True)
+    # --- Agentic chat: talk to your data in plain English ---------------------
+    # Claude answers each turn by exploring the schema and running SELECTs THROUGH
+    # the deployed read-only MCP server, so it can never write. The conversation
+    # is kept in session state and replayed to the backend so follow-ups have
+    # context ("...and how many of those are active?").
+    st.markdown('<div class="section-title">🤖 Chat with your data</div>', unsafe_allow_html=True)
     st.markdown(
-        '<p class="section-sub">Ask a question in plain English. <b>Claude</b> explores the '
-        'schema and runs <code>SELECT</code> queries <b>through your read-only MCP server</b> '
-        'to answer — it cannot write, no matter what it generates.</p>',
+        '<p class="section-sub">Ask questions in plain English and keep the conversation going. '
+        '<b>Claude</b> explores the schema and runs <code>SELECT</code> queries <b>through your '
+        'read-only MCP server</b> to answer — it cannot write, no matter what it generates.</p>',
         unsafe_allow_html=True,
     )
-    question = st.text_input(
-        "Your question",
-        placeholder="e.g. How many tables are in this database, and which has the most rows?",
-        key="ask_input",
-    )
-    if st.button("✨  Ask Claude", key="ask_btn"):
-        if question.strip():
-            try:
-                with st.spinner("Claude is exploring your data..."):
-                    st.session_state["ask_result"] = api_ask(active["deployment_id"], question)
-            except APIError as exc:
-                st.session_state["ask_result"] = {"success": False, "message": str(exc)}
 
-    ask = st.session_state.get("ask_result")
-    if ask is not None:
-        if ask.get("success"):
-            st.markdown(
-                '<div class="result-card">'
-                '<span class="badge ok"><span class="dotled"></span>Answer</span></div>',
-                unsafe_allow_html=True,
-            )
-            st.markdown(ask.get("answer", ""))
-            if ask.get("queries"):
-                with st.expander(f"🔎 SQL Claude ran ({len(ask['queries'])})", expanded=False):
-                    for q in ask["queries"]:
+    # Chat history for THIS data source: list of {role, content, queries?}.
+    chat = st.session_state.setdefault("chat", [])
+
+    if chat:
+        col_hint, col_clear = st.columns([3, 1])
+        col_hint.caption(f"💬 {sum(1 for m in chat if m['role'] == 'user')} question(s) this session")
+        if col_clear.button("🧹  Clear chat", key="clear_chat", use_container_width=True):
+            st.session_state["chat"] = []
+            st.rerun()
+
+    # Replay the conversation so far.
+    for msg in chat:
+        with st.chat_message(msg["role"], avatar="🧑‍💻" if msg["role"] == "user" else "🤖"):
+            st.markdown(msg["content"])
+            if msg.get("queries"):
+                with st.expander(f"🔎 SQL Claude ran ({len(msg['queries'])})", expanded=False):
+                    for q in msg["queries"]:
                         st.code(q, language="sql")
-        else:
-            st.info(ask.get("message", "The AI assistant is unavailable."))
+
+    # A form keeps the input inline (not pinned to the viewport bottom) and clears
+    # it on submit, so it plays nicely with the SQL panel below.
+    with st.form("chat_form", clear_on_submit=True):
+        question = st.text_input(
+            "Your message",
+            placeholder="e.g. How many tables are here? Then: which one has the most rows?",
+            label_visibility="collapsed",
+            key="chat_input",
+        )
+        sent = st.form_submit_button("✨  Send to Claude", use_container_width=True)
+
+    if sent and question.strip():
+        # Everything before this turn is the context we send to the backend.
+        history = [{"role": m["role"], "content": m["content"]} for m in chat]
+        chat.append({"role": "user", "content": question})
+        with st.chat_message("user", avatar="🧑‍💻"):
+            st.markdown(question)
+        with st.chat_message("assistant", avatar="🤖"):
+            with st.spinner("Claude is exploring your data..."):
+                try:
+                    ask = api_ask(active["deployment_id"], question, history)
+                except APIError as exc:
+                    ask = {"success": False, "message": str(exc)}
+            if ask.get("success"):
+                answer = ask.get("answer", "")
+                queries = ask.get("queries", [])
+                st.markdown(answer)
+                if queries:
+                    with st.expander(f"🔎 SQL Claude ran ({len(queries)})", expanded=False):
+                        for q in queries:
+                            st.code(q, language="sql")
+                chat.append({"role": "assistant", "content": answer, "queries": queries})
+            else:
+                message = ask.get("message", "The AI assistant is unavailable.")
+                st.info(message)
+                # Keep the turn out of history on failure so a transient error
+                # doesn't poison the context of later questions.
+                chat.pop()
 
     # --- Step 6: run read-only queries through the new server ---
     st.markdown('<div class="section-title">Query your data</div>', unsafe_allow_html=True)
@@ -612,7 +653,7 @@ if active:
             pass
         st.session_state["active"] = None
         st.session_state["query_result"] = None
-        st.session_state["ask_result"] = None
+        st.session_state["chat"] = []
         st.rerun()
 
     result = st.session_state.get("query_result")
@@ -641,7 +682,7 @@ if active:
     if st.button("＋  Connect another data source", key="connect_another"):
         st.session_state["active"] = None
         st.session_state["query_result"] = None
-        st.session_state["ask_result"] = None
+        st.session_state["chat"] = []
         st.rerun()
 
 # ================================================================

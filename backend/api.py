@@ -186,9 +186,18 @@ class QueryResult(BaseModel):
     message: Optional[str] = None
 
 
+class ChatTurn(BaseModel):
+    role: str = Field(..., examples=["user", "assistant"])
+    content: str
+
+
 class AskRequest(BaseModel):
     deployment_id: str
     question: str
+    # Prior plain-text turns of the conversation, oldest first, so the assistant
+    # answers follow-ups with context. Tool-call turns are NOT replayed — only the
+    # user questions and the assistant's final answers.
+    history: list[ChatTurn] = Field(default_factory=list)
 
 
 class AskResult(BaseModel):
@@ -424,7 +433,12 @@ async def api_ask(req: AskRequest):
         "never attempt writes. Base every statement on actual query results — do not "
         "fabricate data. When you have enough information, answer concisely in plain language."
     )
-    messages = [{"role": "user", "content": req.question}]
+    # Seed the conversation with prior turns (plain text) so follow-up questions
+    # are answered in context, then append the new question.
+    messages: list[dict] = [
+        {"role": turn.role, "content": turn.content} for turn in req.history
+    ]
+    messages.append({"role": "user", "content": req.question})
     queries: list[str] = []
 
     try:
