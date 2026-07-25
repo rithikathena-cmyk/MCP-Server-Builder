@@ -29,7 +29,7 @@ if not _DB_URL:
         "MCP_DB_URL environment variable is required (injected by the deployer)."
     )
 
-engine = create_engine(_DB_URL)
+engine = create_engine(_DB_URL, pool_pre_ping=True, pool_recycle=300)
 
 
 @mcp.tool()
