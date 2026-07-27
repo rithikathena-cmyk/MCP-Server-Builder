@@ -26,7 +26,7 @@ def render_tables_overview(active: dict) -> None:
     if not selected_table:
         return
 
-    if col_action.button("💬 Ask about table", key=f"ask_btn_{selected_table}", use_container_width=True):
+    if col_action.button("💬 Ask about table", key=f"ask_btn_{selected_table}", width="stretch"):
         question_to_ask = (
             f"Analyze the table '{selected_table}'. List its columns and explain what "
             "kind of data is stored in it based on the first few rows."
@@ -43,7 +43,7 @@ def render_tables_overview(active: dict) -> None:
         if res.get("success"):
             rows = res.get("rows", [])
             if rows:
-                st.dataframe(rows, use_container_width=True)
+                st.dataframe(rows, width="stretch")
             else:
                 st.info(f"Table '{selected_table}' is empty (no rows returned).")
         else:

@@ -89,9 +89,9 @@ def render_connect_form(stepper_slot) -> None:
     build_disabled = not tested_ok or not selected_databases
 
     col_test, col_build = st.columns(2)
-    test_clicked = col_test.button("🔌  Test Connection", key="btn_test", use_container_width=True)
+    test_clicked = col_test.button("🔌  Test Connection", key="btn_test", width="stretch")
     build_clicked = col_build.button(
-        "🚀  Build & Connect", key="btn_build", use_container_width=True, disabled=build_disabled
+        "🚀  Build & Connect", key="btn_build", width="stretch", disabled=build_disabled
     )
 
     # After a successful test, discover available schemas

@@ -71,7 +71,7 @@ def render_query_panel(active: dict) -> None:
                 unsafe_allow_html=True,
             )
             if rows:
-                st.dataframe(rows, use_container_width=True)
+                st.dataframe(rows, width="stretch")
         else:
             st.markdown(
                 '<div class="result-card">'

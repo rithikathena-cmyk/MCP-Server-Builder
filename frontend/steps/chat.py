@@ -45,7 +45,7 @@ def render_chat(active: dict) -> None:
     if chat:
         col_hint, col_clear = st.columns([3, 1])
         col_hint.caption(f"💬 {sum(1 for m in chat if m['role'] == 'user')} question(s) this session")
-        if col_clear.button("🧹  Clear chat", key="clear_chat", use_container_width=True):
+        if col_clear.button("🧹  Clear chat", key="clear_chat", width="stretch"):
             st.session_state["chat"] = []
             st.rerun()
 
@@ -67,7 +67,7 @@ def render_chat(active: dict) -> None:
             label_visibility="collapsed",
             key="chat_input",
         )
-        sent = st.form_submit_button("✨  Send to Claude", use_container_width=True)
+        sent = st.form_submit_button("✨  Send to Claude", width="stretch")
 
     if sent and question.strip():
         # Everything before this turn is the context we send to the backend.
