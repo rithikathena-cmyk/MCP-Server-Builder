@@ -24,7 +24,7 @@ from backend import deployments
 from backend.config import settings
 from backend.connection import build_connection_string, describe_schema, discover_schemas, test_connection
 from backend.deploy import MCPDeployment
-from backend.generator import generate_server, sanitize_server_name
+from backend.generator import generate_server, server_label
 from backend.logging_config import get_logger
 from backend.mcp_client import run_query
 
@@ -39,7 +39,14 @@ class DBConfig(BaseModel):
     db_type: str = Field(..., examples=["MySQL"])
     host: str = Field(..., examples=["127.0.0.1"])
     port: int = Field(..., ge=1, le=65535, examples=[3306])
-    database: Optional[str] = Field(None, description="Database name (optional when discovery is used)", examples=["permit_system"])
+    databases: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Database/schema names to expose (empty before discovery runs). "
+            "MySQL/TiDB may list more than one; PostgreSQL/SQL Server must be exactly one."
+        ),
+        examples=[["permit_system"]],
+    )
     username: str
     password: str
     ssl: bool = Field(default=False, description="Require TLS/SSL (PlanetScale, TiDB Cloud, Neon, etc.)")
@@ -89,7 +96,7 @@ def api_test_connection(config: DBConfig):
     cfg = config.model_dump()
     success, message = test_connection(cfg)
     log.info("test-connection db=%s host=%s user=%s ssl=%s -> %s",
-              cfg.get("database"), cfg["host"], cfg["username"], cfg["ssl"],
+              cfg.get("databases"), cfg["host"], cfg["username"], cfg["ssl"],
               "ok" if success else "FAILED")
     return TestResult(success=success, message=message)
 
@@ -113,10 +120,11 @@ def api_deploy(config: DBConfig):
 
     success, message = test_connection(cfg)
     if not success:
-        log.warning("deploy aborted: connection test failed for db=%s", cfg.get("database", "<none>"))
+        log.warning("deploy aborted: connection test failed for db=%s", cfg.get("databases") or "<none>")
         return DeployResult(success=False, message=message)
 
-    server_name = sanitize_server_name(cfg.get("database", "auto"))
+    databases = cfg.get("databases") or []
+    server_name = server_label(databases)
     deployments.stop_matching(server_name)
 
     port = deployments.find_free_port()
@@ -129,7 +137,7 @@ def api_deploy(config: DBConfig):
     try:
         schema = describe_schema(cfg)
     except Exception as exc:  # noqa: BLE001
-        log.warning("schema introspection failed for db=%s: %s", cfg.get("database"), exc)
+        log.warning("schema introspection failed for db=%s: %s", databases, exc)
         schema = {}
 
     deployment = MCPDeployment(host=settings.mcp_bind_host, port=port)
@@ -154,7 +162,7 @@ def api_deploy(config: DBConfig):
         "meta": {
             "deployment_id": deployment_id,
             "server_name": server_name,
-            "database": cfg.get("database"),
+            "databases": databases,
             "db_type": cfg["db_type"],
             "url": deployment.url,
             "server_path": str(server_path),

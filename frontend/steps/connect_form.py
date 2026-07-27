@@ -64,9 +64,11 @@ def render_connect_form(stepper_slot) -> None:
         "ssl": bool(use_ssl),
     }
     # Signature identifies THIS exact set of inputs, so an earlier "tested OK"
-    # result is invalidated the moment any field is edited.
+    # result is invalidated the moment any field is edited. Database selection
+    # is deliberately excluded — it's chosen from an already-verified server,
+    # so changing it doesn't require re-testing the connection.
     signature = "|".join(
-        str(config.get(k, "")) for k in ("db_type", "host", "port", "database", "username", "password", "ssl")
+        str(config.get(k, "")) for k in ("db_type", "host", "port", "username", "password", "ssl")
     )
     tested_ok = bool(test and test.get("ok") and test.get("sig") == signature)
 
@@ -76,10 +78,20 @@ def render_connect_form(stepper_slot) -> None:
         if not val
     ]
 
+    supports_multi_db = db_type in ("MySQL", "TiDB")
+    available_schemas = st.session_state.get("available_schemas", [])
+    # Read back last run's widget value (if any) so the build button's
+    # disabled state reflects the current selection even though the
+    # multiselect widget itself is drawn further down the page.
+    selected_databases = st.session_state.get("in_selected_databases") or (
+        available_schemas[:1] if available_schemas else []
+    )
+    build_disabled = not tested_ok or not selected_databases
+
     col_test, col_build = st.columns(2)
     test_clicked = col_test.button("🔌  Test Connection", key="btn_test", use_container_width=True)
     build_clicked = col_build.button(
-        "🚀  Build & Connect", key="btn_build", use_container_width=True, disabled=not tested_ok
+        "🚀  Build & Connect", key="btn_build", use_container_width=True, disabled=build_disabled
     )
 
     # After a successful test, discover available schemas
@@ -88,17 +100,30 @@ def render_connect_form(stepper_slot) -> None:
             schemas, error = api_discover_schemas(config)
             if schemas:
                 st.session_state["available_schemas"] = schemas
-                st.session_state["selected_schema"] = schemas[0]
             elif error:
                 st.error(f"Failed to discover databases: {error}")
             else:
                 st.error("No databases found on the server.")
         st.session_state["schemas_fetched"] = True
 
-    # If schemas are available, show a selector
+    # If schemas are available, let the user pick one or more. MySQL/TiDB can
+    # query across every database selected here in the same deployment;
+    # PostgreSQL/SQL Server are capped to exactly one.
     if st.session_state.get("available_schemas"):
-        selected = st.selectbox("Select Database", st.session_state["available_schemas"], key="in_selected_schema")
-        config["database"] = selected
+        selected = st.multiselect(
+            "Select Database(s)" if supports_multi_db else "Select Database",
+            st.session_state["available_schemas"],
+            default=st.session_state["available_schemas"][:1],
+            max_selections=None if supports_multi_db else 1,
+            key="in_selected_databases",
+            help=(
+                "Pick more than one to query across databases in the same chat/query "
+                "session — every SQL reference must then be fully qualified as "
+                "database.table." if supports_multi_db else
+                f"{db_type} connections are scoped to exactly one database."
+            ),
+        )
+        config["databases"] = selected
 
     # --- Live status indicator (persists across reruns) ---
     status_slot = st.empty()
@@ -112,10 +137,11 @@ def render_connect_form(stepper_slot) -> None:
                 unsafe_allow_html=True,
             )
         elif test.get("ok"):
+            databases_label = ", ".join(config.get("databases", [])) or "<none selected>"
             status_slot.markdown(
                 '<div class="result-card">'
                 '<span class="badge ok"><span class="dotled"></span>Connection verified — ready to build</span>'
-                f'<p class="kv">Reachable: <code>{config.get("database", "<none>")}</code> on '
+                f'<p class="kv">Reachable: <code>{databases_label}</code> on '
                 f'<code>{host}:{port}</code> as <code>{username}</code> &middot; <code>{db_type}</code></p>'
                 '</div>',
                 unsafe_allow_html=True,
@@ -147,7 +173,7 @@ def render_connect_form(stepper_slot) -> None:
             }
             st.rerun()
 
-    if build_clicked and tested_ok:
+    if build_clicked and tested_ok and config.get("databases"):
         run_build(stepper_slot, config)
         st.balloons()
         st.rerun()

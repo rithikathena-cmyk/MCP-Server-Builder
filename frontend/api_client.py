@@ -135,24 +135,33 @@ def api_stop(deployment_id: str) -> None:
         pass
 
 
-def fetch_tables(deployment_id: str, db_type: str, database: str) -> list[str]:
+def fetch_tables(deployment_id: str, db_type: str, databases: list[str]) -> list[str]:
+    """Returns table names — fully qualified as `database.table` when more
+    than one database is in scope, plain `table` otherwise."""
+    multi = len(databases) > 1
     if db_type in ("MySQL", "TiDB"):
-        sql = f"SELECT table_name FROM information_schema.tables WHERE table_schema = '{database}' AND table_type = 'BASE TABLE' ORDER BY table_name;"
+        in_list = ", ".join(f"'{d}'" for d in databases)
+        sql = (
+            "SELECT table_schema, table_name FROM information_schema.tables "
+            f"WHERE table_schema IN ({in_list}) AND table_type = 'BASE TABLE' "
+            "ORDER BY table_schema, table_name;"
+        )
     elif db_type == "PostgreSQL":
-        sql = "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE' ORDER BY table_name;"
+        sql = "SELECT 'public' AS table_schema, table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE' ORDER BY table_name;"
     elif db_type == "SQL Server":
-        sql = "SELECT table_name FROM information_schema.tables WHERE table_schema = 'dbo' AND table_type = 'BASE TABLE' ORDER BY table_name;"
+        sql = "SELECT 'dbo' AS table_schema, table_name FROM information_schema.tables WHERE table_schema = 'dbo' AND table_type = 'BASE TABLE' ORDER BY table_name;"
     else:
-        sql = "SELECT table_name FROM information_schema.tables WHERE table_type = 'BASE TABLE' ORDER BY table_name;"
+        sql = "SELECT '' AS table_schema, table_name FROM information_schema.tables WHERE table_type = 'BASE TABLE' ORDER BY table_name;"
 
     try:
         res = api_query(deployment_id, sql)
         if res.get("success"):
             tables = []
             for row in res.get("rows", []):
+                schema = row.get("table_schema") or row.get("TABLE_SCHEMA") or ""
                 name = row.get("table_name") or row.get("TABLE_NAME") or row.get("Table_Name")
                 if name:
-                    tables.append(name)
+                    tables.append(f"{schema}.{name}" if multi and schema else name)
             return tables
     except Exception:
         pass

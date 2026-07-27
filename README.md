@@ -12,6 +12,17 @@ This project solves that by generating, deploying, and registering a new **read-
 5. **Register** it with the host application (writes `generated_servers/registry.json`).
 6. **Query** your data through the new server — writes are refused.
 
+### Multi-database deployments (MySQL/TiDB)
+Step 1's database picker is a multiselect for MySQL/TiDB — a single deployment
+can span several databases, and the assistant/validator require every SQL
+reference to be fully qualified (`database.table`) once more than one is
+selected, so a table name can never be silently guessed across databases. See
+[`mcp_server/sql_validator.py`](mcp_server/sql_validator.py) (the
+`ambiguous_database`/`cross_database_denied` checks) and
+[`backend/prompts/ask.py`](backend/prompts/ask.py). PostgreSQL and SQL Server
+stay scoped to exactly one database per deployment, since they don't support
+cross-database queries over a single connection the way MySQL/TiDB do.
+
 ## Architecture
 - `frontend/` — Streamlit wizard UI (talks to the backend over HTTP).
   - `app.py` — thin entry point: page setup, backend bootstrap, routes to a step.

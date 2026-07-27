@@ -8,7 +8,7 @@ from frontend.api_client import api_query, fetch_tables
 def render_tables_overview(active: dict) -> None:
     if "tables" not in active:
         with st.spinner("Discovering database tables..."):
-            active["tables"] = fetch_tables(active["deployment_id"], active["db_type"], active["database"])
+            active["tables"] = fetch_tables(active["deployment_id"], active["db_type"], active["databases"])
 
     tables = active.get("tables", [])
     if not tables:

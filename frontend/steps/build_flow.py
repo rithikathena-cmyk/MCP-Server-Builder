@@ -56,7 +56,7 @@ def run_build(stepper_slot, config: dict) -> None:
         "server_name": deploy.get("server_name", ""),
         "server_path": deploy.get("server_path", ""),
         "url": deploy.get("url", ""),
-        "database": config["database"],
+        "databases": config["databases"],
         "db_type": config["db_type"],
         "host": config["host"],
         "port": config["port"],

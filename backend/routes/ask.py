@@ -175,7 +175,7 @@ async def api_ask(req: AskRequest):
         log.warning("ask fully rejected dep=%s reasons=%s", req.deployment_id, [i.reason for i in rejected])
         return AskResult(success=False, message=message)
 
-    system = build_system_prompt(meta["db_type"], meta["database"], meta.get("schema"))
+    system = build_system_prompt(meta["db_type"], meta["databases"], meta.get("schema"))
     all_queries: list[str] = []
     answers: list[str] = []
 

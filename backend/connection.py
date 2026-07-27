@@ -41,14 +41,20 @@ def validate_config(config: dict) -> list[str]:
     if not config.get("password"):
         errors.append("Password is required.")
 
-    database = config.get("database")
-    if database and db_type in DIALECT_BY_DB_TYPE:
+    databases = config.get("databases") or []
+    if databases and db_type in DIALECT_BY_DB_TYPE:
         dialect = DIALECT_BY_DB_TYPE[db_type]
         restricted = RESTRICTED_SCHEMAS.get(dialect, set())
-        if str(database).strip().lower() in restricted:
+        for database in databases:
+            if str(database).strip().lower() in restricted:
+                errors.append(
+                    f"'{database}' is a system schema and cannot be used as the "
+                    "business database for a deployment."
+                )
+        if len(databases) > 1 and db_type not in ("MySQL", "TiDB"):
             errors.append(
-                f"'{database}' is a system schema and cannot be used as the "
-                "business database for a deployment."
+                f"{db_type} does not support querying multiple databases from one "
+                "connection — select exactly one."
             )
 
     return errors
@@ -63,7 +69,12 @@ def build_connection_string(config: dict) -> str:
     pwd = quote_plus(str(config["password"]))
     host = config["host"]
     port = config["port"]
-    database = config.get("database")
+    databases = config.get("databases") or []
+    # With more than one database, the connection has no single default schema
+    # to select — every query must be fully qualified anyway (enforced by
+    # mcp_server/sql_validator.py's ambiguous_database check), so just don't
+    # pick one. With zero or one, behave exactly as a single-database config.
+    database = databases[0] if len(databases) == 1 else None
     use_ssl = bool(config.get("ssl", False))
 
     if db_type in ("MySQL", "TiDB"):
@@ -142,36 +153,40 @@ def discover_schemas(config: dict) -> list:
 
 
 def describe_schema(config: dict, max_tables: int = 50, max_columns: int = 30) -> dict:
-    """Return {table_name: [column_names]} for the deployment's business database.
+    """Return {database_name: {table_name: [column_names]}} for the deployment's
+    business database(s) — one entry per database in `config["databases"]`.
 
     This is the ONE privileged, deploy-time introspection of table/column
     names, run directly with the deploying operator's credentials — it is NOT
     exposed as a query-time capability. `run_query` (mcp_server/sql_validator.py)
     refuses any information_schema access at request time, so the "Ask your
     data" agent needs its schema knowledge handed to it up front instead of
-    discovering it live; this is how. Results are capped so a very wide
-    database can't blow up the system prompt built from them.
+    discovering it live; this is how. Results are capped per-database so a
+    very wide database can't blow up the system prompt built from them.
     """
-    database = config.get("database")
-    if not database:
+    databases = config.get("databases") or []
+    if not databases:
         return {}
 
     connection_string = build_connection_string(config)
     engine = create_engine(connection_string)
+    schema_by_database: dict = {}
     with engine.connect() as conn:
-        result = conn.execute(
-            text(
-                "SELECT table_name, column_name FROM information_schema.columns "
-                "WHERE table_schema = :database ORDER BY table_name, ordinal_position"
-            ),
-            {"database": database},
-        )
-        schema: dict = {}
-        for table_name, column_name in result:
-            columns = schema.setdefault(table_name, [])
-            if len(schema) > max_tables:
-                schema.pop(table_name, None)
-                break
-            if len(columns) < max_columns:
-                columns.append(column_name)
-        return schema
+        for database in databases:
+            result = conn.execute(
+                text(
+                    "SELECT table_name, column_name FROM information_schema.columns "
+                    "WHERE table_schema = :database ORDER BY table_name, ordinal_position"
+                ),
+                {"database": database},
+            )
+            schema: dict = {}
+            for table_name, column_name in result:
+                columns = schema.setdefault(table_name, [])
+                if len(schema) > max_tables:
+                    schema.pop(table_name, None)
+                    break
+                if len(columns) < max_columns:
+                    columns.append(column_name)
+            schema_by_database[database] = schema
+    return schema_by_database

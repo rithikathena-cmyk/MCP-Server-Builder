@@ -32,7 +32,7 @@ def deployed(tmp_path_factory):
     con.close()
 
     port = deployments.find_free_port()
-    server_path = generate_server({"database": "quality"}, port)
+    server_path = generate_server({"databases": ["quality"]}, port)
     dep = MCPDeployment(host="127.0.0.1", port=port)
     dep.deploy(server_path, f"sqlite:///{db.as_posix()}")
     assert dep.wait_until_ready(timeout=20), "generated server did not start"
@@ -41,7 +41,7 @@ def deployed(tmp_path_factory):
     deployments.ACTIVE[dep_id] = {
         "deployment": dep,
         "meta": {
-            "deployment_id": dep_id, "server_name": "quality", "database": "quality",
+            "deployment_id": dep_id, "server_name": "quality", "databases": ["quality"],
             "db_type": "SQLite", "url": dep.url, "server_path": str(server_path),
             "registered": False,
         },

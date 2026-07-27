@@ -32,13 +32,14 @@ _SUCCESS_CSS = """
 def render_dashboard(active: dict, stepper_slot) -> None:
     render_stepper(stepper_slot, active=5)
 
+    databases_label = ", ".join(active["databases"])
     st.markdown(_SUCCESS_CSS, unsafe_allow_html=True)
     st.markdown(
         f"""
         <div class="success-hero">
           <div class="check">✓</div>
           <h2>Your data source is connected</h2>
-          <p><b>{active["database"]}</b> ({active["db_type"]}) is live, registered, and ready for read-only queries.</p>
+          <p><b>{databases_label}</b> ({active["db_type"]}) is live, registered, and ready for read-only queries.</p>
         </div>
         """,
         unsafe_allow_html=True,

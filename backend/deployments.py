@@ -60,7 +60,7 @@ def persist_registry() -> None:
         entry["meta"]["server_name"]: {
             "url": entry["meta"]["url"],
             "transport": "http",
-            "database": entry["meta"]["database"],
+            "databases": entry["meta"]["databases"],
             "db_type": entry["meta"]["db_type"],
         }
         for entry in ACTIVE.values()

@@ -18,13 +18,26 @@ _SAFE_NAME = re.compile(r"[^A-Za-z0-9_-]+")
 def sanitize_server_name(raw: str) -> str:
     """Collapse `raw` into a filesystem- and Python-identifier-safe name.
 
-    `raw` ultimately comes from a user-supplied database name; without this,
+    `raw` ultimately comes from user-supplied database name(s); without this,
     characters like `..`/`/` could steer the generated file outside
     OUTPUT_DIR, and other punctuation could break the embedded `FastMCP(...)`
     server-name literal.
     """
     name = _SAFE_NAME.sub("_", raw.strip().replace(" ", "_")).strip("_")
     return name or "server"
+
+
+def server_label(databases: list) -> str:
+    """Sanitized server name for a deployment spanning `databases`.
+
+    Used both by `generate_server` (to name the output file) and by
+    `backend.routes.build` (to key deployment dedup/cleanup) — must stay
+    identical between the two, or stale-deployment matching silently breaks.
+    Truncated to the first 3 names (+ a "_multi" marker) so a deployment
+    spanning many databases doesn't produce an absurdly long filename.
+    """
+    label = "_".join(databases[:3]) + ("_multi" if len(databases) > 3 else "")
+    return sanitize_server_name(label or "auto")
 
 
 def _validator_block() -> str:
@@ -51,6 +64,11 @@ def _errors_block() -> str:
 def generate_server(config: dict, port: int) -> Path:
     """Render the read-only MCP server for `config` on `port`.
 
+    `config["databases"]` is a list of one or more database/schema names —
+    MySQL/TiDB deployments may span several (see `mcp_server/sql_validator.py`
+    for how that's enforced); PostgreSQL/SQL Server are always exactly one
+    (enforced earlier, in `backend/connection.py:validate_config`).
+
     The generated file contains NO credentials — the connection string is
     supplied at runtime via the MCP_DB_URL environment variable. The server runs
     over HTTP at http://<bind_host>:<port>/mcp.
@@ -58,11 +76,11 @@ def generate_server(config: dict, port: int) -> Path:
 
     OUTPUT_DIR.mkdir(exist_ok=True)
 
-    server_name = sanitize_server_name(config.get("database", "auto"))
+    databases = list(config.get("databases") or [])
+    server_name = server_label(databases)
     output = OUTPUT_DIR / f"{server_name}_server.py"
 
     dialect = DIALECT_BY_DB_TYPE.get(config.get("db_type"), "mysql")
-    allowed_database = config.get("database") or ""
 
     template = TEMPLATE.read_text(encoding="utf-8")
     # Generation-time placeholders use a __GEN_*__ token, deliberately distinct
@@ -76,7 +94,7 @@ def generate_server(config: dict, port: int) -> Path:
     template = template.replace("__GEN_MCP_HOST__", settings.mcp_bind_host)
     template = template.replace("__GEN_PORT__", str(port))
     template = template.replace("__GEN_DB_DIALECT__", repr(dialect))
-    template = template.replace("__GEN_ALLOWED_DATABASE__", repr(allowed_database))
+    template = template.replace("__GEN_ALLOWED_DATABASES__", repr(tuple(databases)))
     template = template.replace("__GEN_DEFAULT_LIMIT__", str(settings.default_query_limit))
     template = template.replace("__GEN_MAX_LIMIT__", str(settings.max_query_limit))
     template = template.replace("__GEN_MAX_JOINS__", str(settings.max_joins))
