@@ -4,6 +4,10 @@ generated_servers/registry.json
 .env
 .streamlit/secrets.toml
 
+# Audit logs contain real business questions/SQL text (never credentials, but
+# still not something to version-control alongside the app's own source).
+generated_servers/audit/
+
 # Python
 __pycache__/
 *.py[cod]

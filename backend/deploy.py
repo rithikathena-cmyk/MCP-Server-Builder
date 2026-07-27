@@ -6,6 +6,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from backend.config import settings
+
 
 class MCPDeployment:
     """Launch and supervise a generated MCP server (HTTP transport)."""
@@ -27,8 +29,14 @@ class MCPDeployment:
 
         The database connection string is passed via the MCP_DB_URL environment
         variable rather than baked into the file, so credentials never touch disk.
+        The server's audit log path is passed the same way (MCP_AUDIT_LOG), one
+        file per deployment, so every query attempt is recorded regardless of
+        whether it arrives via this API or a host application connecting to the
+        generated server directly.
         """
-        env = {**os.environ, "MCP_DB_URL": db_url}
+        settings.audit_log_dir.mkdir(parents=True, exist_ok=True)
+        audit_log_path = settings.audit_log_dir / f"{server_path.stem}.jsonl"
+        env = {**os.environ, "MCP_DB_URL": db_url, "MCP_AUDIT_LOG": str(audit_log_path)}
 
         self.process = subprocess.Popen(
             [sys.executable, str(server_path)],
@@ -36,6 +44,7 @@ class MCPDeployment:
             stderr=subprocess.PIPE,
             text=True,
             env=env,
+            cwd=str(Path(__file__).parent.parent),  # project root
         )
 
         return self.process

@@ -1,8 +1,8 @@
 # 🛠️ MCP Server Builder
 
-Generate, deploy, and register a **read-only** MCP server from user-provided
-database parameters — no code required. A non-engineer connects a new data
-source end to end in minutes; every write (`INSERT`/`UPDATE`/`DELETE`) is refused.
+**Scenario:** A manufacturing quality team and a public-sector reporting team each have their own databases, and neither has engineering support. They want to connect their own data source to the platform themselves, in minutes, without writing code.
+
+This project solves that by generating, deploying, and registering a new **read-only** MCP server from user-provided database parameters — no code required. A non-engineer connects a new data source end to end in minutes, and every write (`INSERT`/`UPDATE`/`DELETE`) is safely refused.
 
 ## The six-step flow
 1. **Collect** connection parameters (user ID, password, server/IP, port) — password masked.
@@ -13,16 +13,35 @@ source end to end in minutes; every write (`INSERT`/`UPDATE`/`DELETE`) is refuse
 6. **Query** your data through the new server — writes are refused.
 
 ## Architecture
-- `frontend/app.py` — Streamlit wizard UI (talks to the backend over HTTP).
-- `backend/api.py` — FastAPI service (test / deploy / register / query).
-- `backend/{connection,generator,deploy}.py` + `templates/mcp_template.py` — build logic.
+- `frontend/` — Streamlit wizard UI (talks to the backend over HTTP).
+  - `app.py` — thin entry point: page setup, backend bootstrap, routes to a step.
+  - `theme.py`, `stepper.py`, `api_client.py` — CSS, the progress indicator, the HTTP client.
+  - `steps/` — one module per screen: `connect_form` (1-2), `build_flow` (3-5),
+    `dashboard` + `tables_overview`/`chat`/`query_panel` (5-6).
+- `backend/` — FastAPI service.
+  - `main.py` — the app entry point (routers, lifespan, health/ready).
+  - `routes/build.py` — test-connection / deploy / register / query / status / stop.
+  - `routes/ask.py` — the agentic "Ask your data" chat endpoint.
+  - `deployments.py` — the in-memory registry of active deployments, shared by both routers.
+  - `mcp_client.py` — the shared MCP client call used by both routers.
+  - `{connection,generator,deploy,config,intents,logging_config}.py` — build logic.
+  - `prompts/` — every Claude-facing prompt and tool schema, one file per concern
+    (`ask.py` for the chat assistant, `intent_classifier.py` for the intent gate),
+    kept separate from request-handling code so wording changes never touch logic.
+- `mcp_server/` — the code that becomes each generated read-only MCP server:
+  `template.py` (the file that gets rendered), plus `sql_validator.py`,
+  `errors.py`, `audit.py`, embedded verbatim into every generated server by
+  `backend/generator.py` (and also imported directly by the backend, so build-time
+  connection tests and generated-server query validation share one source of truth).
+- `generated_servers/` — output directory for generated MCP servers; see
+  [`generated_servers/README.md`](generated_servers/README.md).
 
 ## Run locally
 
 Two processes (recommended for development):
 
 ```bash
-python -m uvicorn backend.api:app --port 8000 --reload
+python -m uvicorn backend.main:app --port 8000 --reload
 streamlit run frontend/app.py
 ```
 
